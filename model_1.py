@@ -28,6 +28,11 @@ CV=5.5e-3
 # Diamètre de la trachée et dimension fractale
 Dmax_0 = 2e-2
 h = 2**(-1/3)
+# Compliance pulmonaire à P de rétraction élastique nulle:
+C_0 = 5.7e-6 #m^3.Pa-1
+# Volumes pulmonaires min et max, = à 106 et 20% de la CPT (Capacité Pulmonaire Totale  = CV+RV)
+V_max = 7.5e-3 #m^3
+V_min = 1.4e-3 #m^3
 
 Compliance_param  = [ [0,0.882,0.0108,1,10],
                     [1,0.882,0.0294,1,10],
@@ -48,7 +53,7 @@ Compliance_param  = [ [0,0.882,0.0108,1,10],
 
 eta=1.8e-05          #Viscosité de l'air (Pa.s)
 rho=1.14             #Masse volumique de l'air (kg/m^3)
-P_atm = 1013e2       #Atmospheric pressure
+P_atm = 0.0# 1013e2       #Atmospheric pressure
 ##################################################################################
 
 
@@ -104,11 +109,17 @@ def gen_count(mat_link, mat_node):
 
 
 
-def P_alv(t,VL,Phi):
+def P_alv(t,VL_t,Phi):
     """Computes the initial pleural pression for a last-gen node (to determine Initial Conditions)
     """
-    P_al = Pm*(1-np.exp(-t/tau))*((VL-RV)/CV)-(R*Phi)
+    P_al = Pm*(1-np.exp(-t/tau))*((VL_t-RV)/CV)-(R*Phi)
     return P_al
+
+def P_Pl(t,VL_t,Phi):
+    '''Computes the pleural pressure, considered uniform for the lung system at time t:
+    '''
+    Pst = (V_max - V_min)*(1/C_0)*np.log((V_max-V_min)/(V_max-VL_t))
+    return P_alv(t,VL_t,Phi) - Pst
 
 def D(P,g):
     '''Compliance of a branch (link)
@@ -124,12 +135,13 @@ def D(P,g):
         return Dmax*np.sqrt(a_0*(1-P/P_1)**-n_1)
     else : 
         return Dmax*np.sqrt(1-(1-a_0)*(1-P/P_2)**-n_2)
+    # return(Dmax)
 
 def D4(P,g):
     return D(P,g)**4
 
 
-def dD(P,g):
+def dDdP(P,g):
     '''Returns the derivative of D on P
     '''
    
@@ -142,48 +154,47 @@ def dD(P,g):
         return Dmax*np.sqrt(a_0)*(n_1/P_1)*(1-P/P_1)**(-n_1-1)*(1/(2*np.sqrt((1-P/P_1)**-n_1)))
     else : 
         return Dmax*(1-a_0)*(n_2/P_2)*(1-P/P_2)**(-n_2-1)*(1/(2*np.sqrt((1-P/P_2)**-n_2)))
-    # return(Dmax)
+    # return(0)
 
 
-def f(Po,Pi,g,Q):
+def f(Po,Pi,g,Q,P_plr):
     """Function to solve = 0 for each node to find the local Pi, Po and Q of the link between
     """
     L = 3*Dmax_0*h**g
-    Re = 4*rho*Q/(eta*np.pi*(D(Po,g)+D(Pi,g))/2)
-    return np.array(  quad(D4,Pi,Po,args=g)[0]-32*((rho*Q*(1/np.pi))**2)*np.log(D(Po,g)/D(Pi,g))+(128*eta*L*Q*(1/np.pi))*(1.5+0.0035*Re) )
+    Re = 4*rho*Q/(eta*np.pi*(D(Po-P_plr,g)+D(Pi-P_plr,g))/2)
+    return np.array(  quad(D4,Pi-P_plr,Po-P_plr,args=g)[0]-32*((rho*Q*(1/np.pi))**2)*np.log(D(Po-P_plr,g)/D(Pi-P_plr,g))+(128*eta*L*Q*(1/np.pi))*(1.5+0.0035*Re) )
 
 
-def dfQ(Po,Pi,g,Q):
+def dfdQ(Po,Pi,g,Q,P_plr):
     '''returns df/dQ
     '''
     L = 3*Dmax_0*h**g
-    Re = 4*rho*Q/(eta*np.pi*(D(Po,g)+D(Pi,g))/2)
-    return np.array(  -32*2*Q*((rho*(1/np.pi))**2)*np.log(D(Po,g)/D(Pi,g))+(128*eta*L*(1/np.pi))*(1.5+0.0035*Re) )
+    Re = 4*rho*Q/(eta*np.pi*(D(Po-P_plr,g)+D(Pi-P_plr,g))/2)
+    return np.array(  -32*2*Q*((rho*(1/np.pi))**2)*np.log(D(Po-P_plr,g)/D(Pi-P_plr,g))+(128*eta*L*(1/np.pi))*(1.5+0.0035*Re) )
 
-def dfPo(Po,Pi,g,Q):
+def dfdPo(Po,Pi,g,Q,P_plr):
     '''returns df/dPo
     '''
-    return np.array( D4(Po,g)-32*((rho*Q*(1/np.pi))**2)*dD(Po,g)/D(Po,g) )
+    return np.array( D4(Po-P_plr,g)-32*((rho*Q*(1/np.pi))**2)*dDdP(Po-P_plr,g)/D(Po-P_plr,g) )
 
-def dfPi(Po,Pi,g,Q):
+def dfdPi(Po,Pi,g,Q,P_plr):
     '''returns df/dPi
     '''
-    return np.array( -D4(Pi,g)+32*((rho*Q*(1/np.pi))**2)*dD(Pi,g)/D(Pi,g) )
+    return np.array( -D4(Pi-P_plr,g)+32*((rho*Q*(1/np.pi))**2)*dDdP(Pi-P_plr,g)/D(Pi-P_plr,g) )
 
 
-def refresh_system(mat_link,mat_node,P_ini,Q_ini,t=0,Phi = 0,epsilon=1e-3):
+def refresh_system(mat_link,mat_node,P_ini,Q_ini,t=0,epsilon=1e-3):
     """Computes the state of the system for 1 temporal iteration 
 
     P_ini, Qini = set of value for P and Q 
     """
-   
+    Phi = Q_ini[0]
     
     n = len(mat_link) #N° of nodes and intersections
     P = P_ini.copy() #will contain the pressures at time t
     Q = Q_ini.copy() #will contain the debit at time t
     gen = gen_count(mat_link,mat_node)
     N_gen = max(gen) #N° of gen
-    # print(N_gen)
 
     N_f = gen.count(max(gen)) # N° of end node/link
     N_Q = len(Q)-1-N_f #Nb of debit equations = Nb of pressure variables:
@@ -198,13 +209,20 @@ def refresh_system(mat_link,mat_node,P_ini,Q_ini,t=0,Phi = 0,epsilon=1e-3):
     X = np.array( Q[1:]+P[2:len(P)-N_f] )
     X0=X.copy()
 
+    DeltaP = 7000   #Linearises the D(P) :  if DeltaP if very high, the behaviour of D(P) is asymptotical and D(P) = Dmax, dDdP(P) = 0. If it is set to 0, we have full non linear behavior. Lim of divergence aroud P_Pl
+    P_pl = P_Pl(t, CV, Phi) - DeltaP
+    if DEBUG >= 1:
+        print('P_pl:',P_pl+DeltaP, '\nDeltaP:',DeltaP)
+
     assert len(X) == N_P+N_Q, "Var X len issue"
         
     
     steps = 0
+    start = 1
 
-    while np.linalg.norm(X)>=epsilon:
+    while np.linalg.norm(F)>=epsilon or start == 1:
 
+        start = 0
     #First we update F and dF
         P = P[1:] #BC the index 0 is the pressure BEFORE the tracheat (above gen 0), and in the P list, index 0 = P_atm, after the trachea
 
@@ -225,60 +243,76 @@ def refresh_system(mat_link,mat_node,P_ini,Q_ini,t=0,Phi = 0,epsilon=1e-3):
 
 
         for i in range(N_Q,N_Q+N_P): # N of link equation
-            
+
+            # if i == N_Q : #Different equation for the link of the upper trachea
+            # #     print(i)
+            # #     print(P[0])
+            #     F[i] = P[0] - P_atm - R_ext*abs(Q[1])**r
+            #     dF[i][0] = -r*R_ext*abs(Q[1])**(r-1)
+            #     dF[i][N_P-1] = 1
+
             link = mat_link[i+1-N_Q] #CARE +1..?
-            F[i] = f( P[link[0]], P[link[1]], gen[link[1]], Q[link[1]] )
+            F[i] = f( P[link[0]], P[link[1]], gen[link[1]], Q[link[1]], P_pl )
             # print(link)
             # print(P)
             # print(P[link[0]],P[link[1]],gen[link[1]])
             # print(f(P[link[0]],P[link[1]],gen[link[1]],Q[link[1]]))
             # print(F[i])
 
-            dF[i][i-N_Q] = dfQ( P[link[0]], P[link[1]], gen[link[1]], Q[link[1]] )
+            dF[i][i-N_Q] = dfdQ( P[link[0]], P[link[1]], gen[link[1]], Q[link[1]], P_pl )
 
             for xl in link :
                 if gen[xl] != -1 and gen[xl] != N_gen:
                     if xl == link[0]:
-                        dF[i][N_P+xl-1]=dfPo(P[link[0]], P[link[1]], gen[link[1]], Q[link[1]] ) #CARE +1..?
+                        dF[i][N_P+xl-1]=dfdPo(P[link[0]], P[link[1]], gen[link[1]], Q[link[1]], P_pl ) #CARE -1..?
                         # print(dF[i][N_P+xl-1],xl,'C0')
                         # print(i,N_P+xl-1)
                     else : 
-                        dF[i][N_P+xl-1]=dfPi(P[link[0]], P[link[1]], gen[link[1]], Q[link[1]] ) #CARE +1..?
+                        dF[i][N_P+xl-1]=dfdPi(P[link[0]], P[link[1]], gen[link[1]], Q[link[1]], P_pl ) #CARE -1..?
                         # print(dF[i][N_P+xl-1],xl,'C1')
                         # print(i,N_P+xl-1)
 
 
 
-        #print(F,dF)
-
         #update X with Newton Raphson scheme
         dX = np.dot(np.linalg.inv(dF),F)
-        X-= dX
-        steps+=1
+        X -= dX
+        steps += 1
 
         #Update P and Q for next iteration
-        P = [P_atm,P_atm - R_ext*Phi**r]+list(X[len(Q[1:]):])+[P_alv(t,CV,Phi)for k in range(N_f)] #CARE need to update VL(t)
+        P = [P_atm + P_pl, P_atm - R_ext*Phi**r]+list(X[len(Q[1:]):])+[P_alv(t,CV,Phi)for k in range(N_f)] #CARE need to update VL_t
         Q = [X[0]]+list(X[:len(Q[1:])])
 
-        # if steps%1000==0 or steps == 1:
-        #     print(steps,'\n dX:',X,'\n X:',dX,'\n F: ',F,'\n dF: ',dF)
+        if DEBUG >= 2: ######### Debuging
+            if steps%10 == 0 or steps == 1:
+                print('step',steps,'\n dX:',X,'\n X:',dX,'\n F: ',F,'\n dF: ',dF)
+
+        if DEBUG >= 3:
+            if steps%10 == 0 or steps == 1:
+                print('dF-1:',np.linalg.inv(dF))
+
+
 
         if steps >= 10e2:
             break
     
-    
-    return X,X0,P,Q
+    if DEBUG >= 1:
+        print('Number of steps : \n',steps )
+    return X,X0,[P_atm]+P[1:],Q
 
     
 
 
-
+#####################################################################################
+#########################################TEST########################################
+DEBUG = 2
     
+#NOTES : On observe une divergence des solution pour le D non linéarisé. La divergence a lieu lorsque DeltaP, le delta de linearisation, s'approche (a 10Pa près) de P_pleural
 
+#testing for low n in a symetric tree : ###########################################
 
-#testing for low n in a symetric tree
 Delta_t = 0.1
-n=5
+n=3
 links, nodes = mat_links(n), mat_nodes(n)
 NL=len(links)
 
@@ -290,8 +324,11 @@ P=[P_atm for k in range(NL+1-N_f)]+[P_alv(Delta_t,CV,0)for k in range(N_f)] #At 
 
 Q=[0 for k in range(NL)]
 
+print('links:',links,'\nnodes:',nodes)
+print('links generations:',gen)
+print('initial Pressure:',P,'\ninitial Debit:',Q)
 
-Rez = refresh_system(links, nodes,P,Q,Delta_t)
+Rez = refresh_system(links,nodes,P,Q,Delta_t)
 print('New X---------------')
 print(Rez[0])
 print('X before descent----')
@@ -304,8 +341,39 @@ print(Rez[3])
 
 print('------------------------------')
 
-print(links, nodes)
-print (gen)
-print(P,Q)
 
-#Testint for low n and an asymetric tree : 
+#Testint for low n and an asymetric tree : ###########################################
+
+# Delta_t = 0.1
+# n=5
+# A la main
+# links = [['atm',0],[0,1],[1,2],[1,3],[2,4],[3,5],[3,6],[4,7],[4,8],[5,9],[6,10]]
+# nodes = [[0,1],[1,2,3],[2,4],[3,5,6],[4,7,8],[5,9],[6,10]]
+# NL=len(links)
+
+# gen = gen_count(links,nodes)
+# N_gen = max(gen) 
+# N_f = gen.count(max(gen))
+
+# P=[P_atm for k in range(NL+1-N_f)]+[P_alv(Delta_t,CV,0)for k in range(N_f)] #At t = 0, we consider the lungs full, with no flow thus phi = 0 also
+
+# Q=[0 for k in range(NL)]
+
+
+
+# Rez = refresh_system(links, nodes,P,Q,Delta_t)
+# print('New X---------------')
+# print(Rez[0])
+# print('X before descent----')
+# print(Rez[1])
+# print('New P---------------')
+# print(Rez[2])
+# print('New Q---------------')
+# print(Rez[3])
+
+
+# print('------------------------------')
+
+# print(links, nodes)
+# print (gen)
+# print(P,Q)
